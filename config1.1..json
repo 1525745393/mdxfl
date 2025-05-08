@@ -1,0 +1,16 @@
+{
+    "scan_root": "./JAV_output",
+    "output_vsmeta_dir": "",
+    "skip_existing": true,
+    "rename_video": false,
+    "rename_keep_original": true,
+    "rename_skip_well_named": true,
+    "rename_template": "{id}_{title}",
+    "thread_count": 4,
+    "log_dir": "./logs",
+    "log_format": "txt",
+    "dry_run": false,
+    "python_path": "",
+    "video_extensions": [".mp4", ".mkv", ".avi", ".mov", ".wmv"],
+    "nfo_dir": ""
+}
