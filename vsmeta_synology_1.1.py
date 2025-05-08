@@ -1,45 +1,43 @@
-×××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××
-# VSmeta 群晖整合脚本 v1.1
-# 文件名建议：vsmeta_synology_1.1.py
-# 适用于 Synology DSM / Python 3 环境，一键生成 .vsmeta 元数据文件
-×××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××
+#!/usr/bin/env python3
+# 群晖专用版 VSmeta 生成工具 v1.1
+# 支持自动识别 Python 路径、多视频格式、dry-run、JSON日志、重命名模板等功能
 
 import os
+import re
 import json
 import argparse
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
-# 默认支持的视频格式
-SUPPORTED_VIDEO_EXT = [".mp4", ".mkv", ".avi", ".mov", ".wmv"]  # 建议：涵盖主流格式，扩展兼容性；更改后果：可能跳过部分文件
-
-# 默认配置（支持自动补全）
-DEFAULT_CONFIG = {
-    "scan_root": "./JAV_output",  # 建议：设为待整理视频目录根路径；更改后果：脚本不会找到目标文件
-    "output_vsmeta_dir": "",  # 建议：留空使用视频同目录；更改后果：指定路径需确保存在并有写权限
-    "thread_count": 4,  # 建议：NAS 推荐 4-8；更改后果：线程过高可能占用资源
-    "skip_existing": True,  # 建议：避免重复生成；更改后果：False 会覆盖已存在 vsmeta
-    "rename_video": False,  # 建议：测试确认后开启；更改后果：开启后将重命名文件
-    "rename_keep_original": True,  # 建议：开启以保留原文件；更改后果：False 会直接覆盖原文件
-    "rename_skip_well_named": True,  # 建议：跳过规范文件；更改后果：False 会重命名所有文件
-    "rename_template": "{id}_{title}",  # 建议：简洁结构化命名；更改后果：格式不合法可能出错
-    "log_dir": "./logs",  # 建议：日志独立存储，便于查看问题；更改后果：无效路径无法写入日志
-    "log_format": "txt",  # 建议：txt 或 json 可选；更改后果：写入失败
-    "dry_run": False,  # 建议：先 dry-run 模拟；更改后果：False 会真实改动文件
-    "python_path": ""  # 建议：留空自动检测；更改后果：手动指定必须为有效路径
+# 默认配置项，建议使用示例文件进行修改；配置字段缺失将自动补全
+default_config = {
+    "scan_root": "./JAV_output",  # 视频扫描路径 # 建议指定为待处理主目录 # 改为自定义路径："/path/to/your/videos"
+    "output_vsmeta_dir": "",  # .vsmeta 输出路径 # 留空则与视频同目录 # 推荐使用独立路径提升性能
+    "skip_existing": True,  # 是否跳过已有 .vsmeta 文件 # True 节省处理时间 # 改为 False 强制覆盖
+    "rename_video": False,  # 是否启用重命名功能 # 默认关闭避免误操作 # 改为 True 启用：true
+    "rename_keep_original": True,  # 重命名后保留原文件 # 避免误删 # 改为 False 删除原文件
+    "rename_skip_well_named": True,  # 已规范命名是否跳过 # 防止重复重命名 # 改为 False 强制改名
+    "rename_template": "{id}_{title}",  # 重命名模板 # 建议只包含 id 和 title 字段，避免路径过长
+    "thread_count": 4,  # 并发线程数 # 群晖建议 4～8 # 改为 2 或更高按性能调整
+    "log_dir": "./logs",  # 日志保存目录 # 建议独立文件夹便于管理
+    "log_format": "txt",  # 日志格式：txt 或 json # json 可用于后期分析 # 改为 "json" 启用结构化日志
+    "dry_run": False,  # 模拟运行模式 # True 表示不实际修改文件，仅预览操作 # 改为 False 执行真实操作
+    "python_path": "",  # Python 路径 # 留空自动判断 # 可手动指定为 /usr/local/bin/python3
+    "video_extensions": [".mp4", ".mkv", ".avi", ".mov", ".wmv"],  # 支持的视频格式 # 可自行扩展
+    "nfo_dir": ""  # 预留字段：用于将 NFO 转换为 .vsmeta # 暂未实现
 }
 
-# 加载配置并补全缺失字段
-def load_config(path):
-    with open(path, "r", encoding="utf-8") as f:
+# 自动补全配置字段
+def load_config(config_path):
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    for k, v in DEFAULT_CONFIG.items():
+    for k, v in default_config.items():
         if k not in config:
             config[k] = v
-            print(f"[提示] 已补全默认配置：{k} = {v}")
+            print(f"[警告] 缺失配置项 '{k}'，已自动补全默认值: {v}")
     return config
 
-# 自动检测 Python 路径
+# 自动判断 Python 路径
 def find_python_path(user_path):
     if user_path and Path(user_path).exists():
         return user_path
@@ -48,70 +46,115 @@ def find_python_path(user_path):
             return p
     return "python3"
 
-# 简化 vsmeta 示例生成
-def generate_vsmeta(video_path, output_path):
-    dummy_metadata = {
-        "title": "示例标题",
-        "title_ja": "サンプルタイトル",
-        "plot": "剧情简介",
-        "plot_ja": "プロット",
-        "id": video_path.stem,
-        "tag": ["标签1", "标签2"]
+# 简易 vsmeta 数据生成（模拟）
+def generate_vsmeta(video_path):
+    name = video_path.stem
+    fake_id = re.search(r"[A-Z]{2,5}-?\d{3,5}", name.upper())
+    vid = fake_id.group() if fake_id else "UNKNOWN"
+    return {
+        "id": vid,
+        "title": f"示例标题_{vid}",
+        "title_ja": f"サンプルタイトル_{vid}",
+        "plot": "暂无剧情信息",
+        "plot_ja": "ストーリー情報なし",
+        "actor": ["演员A", "演员B"],
+        "tag": ["剧情", "制服"],
+        "studio": "示例片商",
+        "date": "2024-01-01",
+        "series": "系列作"
     }
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(dummy_metadata, f, indent=2, ensure_ascii=False)
 
-# 主处理函数
-def process_videos(config):
+# 保存 .vsmeta 文件
+def save_vsmeta(meta, output_path, dry_run):
+    if dry_run:
+        print(f"[Dry-run] 将保存 vsmeta 至: {output_path}")
+        return
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+
+# 根据模板生成新文件名
+def generate_new_filename(template, meta, suffix=".mp4"):
+    try:
+        newname = template.format(**meta)
+    except KeyError:
+        newname = meta["id"]
+    return re.sub(r"[\\/:*?\"<>|]", "_", newname) + suffix
+
+# 日志记录器
+class Logger:
+    def __init__(self, path, json_mode=False):
+        self.json_mode = json_mode
+        self.log = []
+        self.path = path
+        Path(path.parent).mkdir(parents=True, exist_ok=True)
+
+    def add(self, status, path, reason=""):
+        entry = {"status": status, "path": str(path), "reason": reason}
+        self.log.append(entry)
+        print(f"[{status}] {path}" + (f"，原因：{reason}" if reason else ""))
+
+    def save(self):
+        if self.json_mode:
+            with open(self.path, 'w', encoding='utf-8') as f:
+                json.dump(self.log, f, indent=2, ensure_ascii=False)
+        else:
+            with open(self.path, 'w', encoding='utf-8') as f:
+                for entry in self.log:
+                    f.write(f"[{entry['status']}] {entry['path']}" +
+                            (f"，原因：{entry['reason']}" if entry['reason'] else "") + "\n")
+
+# 主处理逻辑
+def process_all(config):
     scan_root = Path(config["scan_root"])
-    out_dir = config["output_vsmeta_dir"]
+    output_dir = Path(config["output_vsmeta_dir"]) if config["output_vsmeta_dir"] else None
+    extensions = tuple(config["video_extensions"])
     dry_run = config["dry_run"]
-    output_root = Path(out_dir) if out_dir else None
-    log_root = Path(config["log_dir"])
-    log_format = config["log_format"]
-    log_root.mkdir(parents=True, exist_ok=True)
-    log_entries = []
-    total, success, failed = 0, 0, 0
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_root / f"log_{timestamp}.{log_format}"
+    log_format = config["log_format"].lower()
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_path = Path(config["log_dir"]) / f"log_{ts}.{log_format}"
+    logger = Logger(log_path, json_mode=(log_format == "json"))
 
     for root, _, files in os.walk(scan_root):
-        for f in files:
-            if not any(f.lower().endswith(ext) for ext in SUPPORTED_VIDEO_EXT):
+        for file in files:
+            if not file.lower().endswith(extensions):
                 continue
-            total += 1
-            video_path = Path(root) / f
-            vsmeta_path = (output_root / video_path.name).with_suffix(".vsmeta") if output_root else video_path.with_suffix(".vsmeta")
+            full_path = Path(root) / file
             try:
+                meta = generate_vsmeta(full_path)
+                vsmeta_path = (output_dir or full_path.parent) / (full_path.stem + ".vsmeta")
                 if config["skip_existing"] and vsmeta_path.exists():
+                    logger.add("跳过", full_path, "vsmeta 已存在")
                     continue
-                if not dry_run:
-                    generate_vsmeta(video_path, vsmeta_path)
-                log_entries.append({"file": str(video_path), "status": "success"})
-                success += 1
+                save_vsmeta(meta, vsmeta_path, dry_run)
+
+                if config["rename_video"]:
+                    new_name = generate_new_filename(config["rename_template"], meta, suffix=full_path.suffix)
+                    new_path = full_path.parent / new_name
+                    if config["rename_video"]:
+                    new_name = generate_new_filename(config["rename_template"], meta, suffix=full_path.suffix)
+                    new_path = full_path.parent / new_name
+                    if config["rename_skip_well_named"] and full_path.stem in new_name:
+                        logger.add("跳过", full_path, "已符合命名规范")
+                        continue
+                    if not dry_run:
+                        if config["rename_keep_original"]:
+                            full_path.rename(new_path)
+                        else:
+                            os.replace(full_path, new_path)
+                    logger.add("重命名", new_path)
+                else:
+                    logger.add("成功", full_path)
             except Exception as e:
-                log_entries.append({"file": str(video_path), "status": "failed", "reason": str(e)})
-                failed += 1
+                logger.add("失败", full_path, str(e))
 
-    # 写日志
-    if log_format == "json":
-        with open(log_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "summary": {"total": total, "success": success, "failed": failed, "dry_run": dry_run},
-                "details": log_entries
-            }, f, ensure_ascii=False, indent=2)
-    else:
-        with open(log_file, "w", encoding="utf-8") as f:
-            f.write(f"处理总数：{total}，成功：{success}，失败：{failed}，dry-run 模式：{'启用' if dry_run else '关闭'}\n")
-            for entry in log_entries:
-                status = entry["status"]
-                reason = entry.get("reason", "")
-                f.write(f"[{status.upper()}] {entry['file']}" + (f"，原因：{reason}\n" if reason else "\n"))
+    logger.save()
 
+# CLI 入口
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="VSmeta 群晖脚本 v1.1")
+    parser = argparse.ArgumentParser(description="VSmeta 群晖专用整理工具 v1.1")
     parser.add_argument("--config", type=str, default="config.json", help="配置文件路径（默认 config.json）")
     args = parser.parse_args()
+
     config = load_config(args.config)
     config["python_path"] = find_python_path(config.get("python_path", ""))
-    process_videos(config)
+    process_all(config)
