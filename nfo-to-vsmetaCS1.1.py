@@ -19,8 +19,8 @@ CONFIG = {
     'LOG_FILE':  '/volume1/MDC1/nfo_converter.log', # 日志文件路径 
     'FILE_PATTERNS': {                  # 自定义文件匹配规则 
         'nfo': ['*.nfo'],               # NFO文件格式 
-        'poster': ['poster.jpg', 'folder.jpg', '*.jpg'], # 封面图规则 
-        'backdrop': ['fanart.jpg', 'background.jpg'] # 背景图规则 
+        'poster': ['-poster.jpg', 'folder.jpg', '*.jpg'], # 封面图规则 
+        'backdrop': ['-fanart.jpg', 'background.jpg'] # 背景图规则 
     }
 }
  
