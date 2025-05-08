@@ -1,4 +1,4 @@
-# vsmeta 群晖整合版 v1.1 中文使用说明
+cd /volume1/你的脚本目录/vsmeta_synology_1.1 /usr/local/bin/python3 vsmeta_synology_1.1.py# vsmeta 群晖整合版 v1.1 中文使用说明
 
 本工具用于扫描 JAV 视频并自动生成 Emby/Jellyfin 可识别的 `.vsmeta` 元数据文件，并支持视频重命名、日志记录、群晖兼容性优化等功能。
 
@@ -62,3 +62,33 @@
 - 常规标签页中设置任务名如 "生成VSmeta"
 - 用户选择：root 或 admin
 - 脚本内容填入：
+cd /volume1/你的脚本目录/vsmeta_synology_1.1 /usr/local/bin/python3 vsmeta_synology_1.1.py
+
+- 可设定定期执行计划或手动运行
+
+2. DSM 内置终端 / SSH 执行方式
+
+- 打开“控制面板 > 终端与 SNMP”，启用 SSH 服务
+- 使用 SSH 工具连接群晖（如 Terminal / PuTTY）
+- 输入命令运行：
+cd /volume1/你的脚本目录/vsmeta_synology_1.1 /usr/local/bin/python3 vsmeta_synology_1.1.py
+────────────────────────────────────────
+五、注意事项
+
+- 默认不覆盖已有 .vsmeta 文件，可在配置中关闭 skip_existing
+- dry-run 模式建议首次运行启用，确认无误后关闭
+- 支持的视频格式：.mp4, .mkv, .avi, .mov, .wmv, .flv, .webm 等
+- 推荐将日志输出设为独立目录，避免干扰主目录内容
+
+────────────────────────────────────────
+六、目录结构说明
+
+vsmeta_synology_1.1/
+├── vsmeta_synology_1.1.py    # 主脚本（整合所有模块，群晖优化）
+├── config.json               # 配置文件（建议修改后使用）
+├── logs/                     # 运行日志输出目录
+├── readme.txt                # 中文说明文档
+├── changelog.txt             # 更新日志
+└── examples/
+  ├── example_config.json   # 示例配置
+  └── vsmeta_example.vsmeta # 示例生成文件
