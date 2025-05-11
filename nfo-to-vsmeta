@@ -1,59 +1,61 @@
 #!/usr/bin/env python
 
 import os
-import xml.dom.minidom as xmldom
-import base64
-import hashlib
+import json
+import logging
 import time
 import io
-import logging
 from PIL import Image
-import argparse
+import hashlib
+import xml.dom.minidom as xmldom
+import base64
 
-# 设置日志记录
+# 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-VIDEO_FORMATS = ['.mkv', '.mp4', '.rmvb', '.avi', '.wmv', '.ts']
-IGNORED_FORMATS = ['.vsmeta', '.jpg', '.nfo', '.srt', '.ass', '.ssa', '.png', '.db']
+def load_config(config_file="config.json"):
+    """从 config.json 文件加载配置"""
+    if not os.path.exists(config_file):
+        raise FileNotFoundError(f"配置文件 {config_file} 不存在，请创建配置文件并设置参数。")
+    with open(config_file, 'r', encoding='utf-8') as file:
+        return json.load(file)
 
-def scan_directory(directory, convert_list, poster_suffix, fanart_suffix):
-    """
-    遍历目录并处理视频文件，生成 .vsmeta 文件
-    """
+def check_all_files(config, convert_list):
+    """检查目录中的所有文件，处理符合条件的视频文件"""
+    directory = config['directory']
+    poster = config['poster_suffix']
+    fanart = config['fanart_suffix']
+    video_extensions = config['video_extensions']
+    delete_vsmeta = config.get('delete_vsmeta', False)  # 默认为False
+    
     for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if d != '@eaDir']  # 跳过系统目录
-        video_files = filter_video_files(files)
-
-        for filename in video_files:
-            vsmeta_path = os.path.join(root, filename + '.vsmeta')
-            if not os.path.exists(vsmeta_path):
-                nfo_path = os.path.join(root, os.path.splitext(filename)[0] + '.nfo')
-                if os.path.exists(nfo_path):
+        for filename in files:
+            if '@eaDir' in root:
+                continue
+            _, ext = os.path.splitext(filename)
+            if ext.lower() in video_extensions:  # 按配置支持的视频格式匹配
+                vsmeta_path = os.path.join(root, filename + '.vsmeta')
+                
+                # 删除已有的vsmeta文件
+                if delete_vsmeta and os.path.exists(vsmeta_path):
+                    logging.info(f"删除已有vsmeta文件: {vsmeta_path}")
+                    os.remove(vsmeta_path)
+                
+                poster_path = os.path.join(root, os.path.splitext(filename)[0] + poster)
+                fanart_path = os.path.join(root, os.path.splitext(filename)[0] + fanart)
+                if not os.path.exists(vsmeta_path):
+                    nfo_path = os.path.join(root, os.path.splitext(filename)[0] + '.nfo')
                     convert_list.append(nfo_path)
-                    try:
-                        action(
-                            nfo_path,
-                            vsmeta_path,
-                            os.path.join(root, os.path.splitext(filename)[0] + poster_suffix),
-                            os.path.join(root, os.path.splitext(filename)[0] + fanart_suffix),
-                        )
-                    except Exception as e:
-                        logging.error(f"Error processing {nfo_path}: {e}")
-                else:
-                    logging.warning(f"Missing .nfo file for {filename}")
-
-
-def filter_video_files(files):
-    """
-    过滤视频文件
-    """
-    return [f for f in files if os.path.splitext(f)[1].lower() in VIDEO_FORMATS]
-
+                    if os.path.exists(nfo_path):
+                        try:
+                            action(nfo_path, vsmeta_path, poster_path, fanart_path)
+                        except Exception as e:
+                            logging.error(f"文件 {nfo_path} 处理失败: {e}")
+            elif ext.lower() not in ['.vsmeta', '.jpg', '.nfo', '.srt', '.ass', '.ssa', '.png', '.db']:
+                logging.warning(f"未识别的文件类型: {os.path.join(root, filename)}")
 
 def action(nfo_path, target_path, poster_path, fanart_path):
-    """
-    根据 .nfo 文件内容生成 .vsmeta 文件
-    """
+    """根据 nfo 文件创建 vsmeta 文件"""
     doc = xmldom.parse(nfo_path)
     title = get_node(doc, 'title', '无标题')
     sorttitle = get_node(doc, 'sorttitle', title)
@@ -69,104 +71,138 @@ def action(nfo_path, target_path, poster_path, fanart_path):
     writ = get_node_list(doc, 'writer')
 
     buf, group = bytearray(), bytearray()
+    write_byte(buf, 0x08)
+    write_byte(buf, 0x01)
 
-    # 写入元数据
-    write_metadata(buf, title, sorttitle, tagline, year, date, plot, level, rate)
+    write_byte(buf, 0x12)
+    write_string(buf, title)
 
-    # 添加演员、导演、流派等信息
-    append_group_data(group, act, 0x0A)
-    append_group_data(group, direc, 0x12)
-    append_group_data(group, genre, 0x1A)
-    append_group_data(group, writ, 0x22)
+    write_byte(buf, 0x1A)
+    write_string(buf, sorttitle)
 
-    writeByte(buf, 0x52)
-    writeInt(buf, len(group))
+    write_byte(buf, 0x22)
+    write_string(buf, tagline)
+
+    write_byte(buf, 0x28)
+    write_int(buf, int(year))
+
+    write_byte(buf, 0x32)
+    write_string(buf, date)
+
+    write_byte(buf, 0x38)
+    write_byte(buf, 0x01)
+
+    write_byte(buf, 0x42)
+    write_string(buf, plot)
+
+    for a in act:
+        write_byte(group, 0x0A)
+        write_string(group, a)
+
+    for d in direc:
+        write_byte(group, 0x12)
+        write_string(group, d)
+
+    for g in genre:
+        write_byte(group, 0x1A)
+        write_string(group, g)
+
+    for w in writ:
+        write_byte(group, 0x22)
+        write_string(group, w)
+
+    write_byte(buf, 0x52)
+    write_int(buf, len(group))
     buf.extend(group)
     group.clear()
 
-    # 写入图片数据
-    write_image_data(buf, poster_path, 0x8A)
-    write_image_data(buf, fanart_path, 0xAA, group)
+    write_byte(buf, 0x5A)
+    write_string(buf, level)
 
-    # 保存生成的 .vsmeta 文件
+    write_byte(buf, 0x60)
+    write_int(buf, int(float(rate) * 10))
+
+    if os.path.exists(poster_path):
+        write_byte(buf, 0x8A)
+        write_byte(buf, 0x01)
+
+        poster_final = to_base64(poster_path)
+        poster_md5 = to_md5(poster_final)
+
+        write_string(buf, poster_final)
+        write_byte(buf, 0x92)
+        write_byte(buf, 0x01)
+        write_string(buf, poster_md5)
+
+    if os.path.exists(fanart_path):
+        write_byte(buf, 0xAA)
+        write_byte(buf, 0x01)
+
+        fanart_final = to_base64(fanart_path)
+        fanart_md5 = to_md5(fanart_final)
+
+        write_byte(group, 0x0A)
+        write_string(group, fanart_final)
+        write_byte(group, 0x12)
+        write_string(group, fanart_md5)
+        write_byte(group, 0x18)
+        write_int(group, int(time.time()))
+
+        write_int(buf, len(group))
+        buf.extend(group)
+        group.clear()
+
     with open(target_path, 'wb') as op:
         op.write(buf)
 
+def write_byte(ba, t):
+    ba.extend(bytes([int(str(t))]))
 
-def write_metadata(buf, title, sorttitle, tagline, year, date, plot, level, rate):
-    """
-    写入基本元数据
-    """
-    writeByte(buf, 0x08)
-    writeByte(buf, 0x01)
-    writeByte(buf, 0x12)
-    writeString(buf, title)
-    writeByte(buf, 0x1A)
-    writeString(buf, sorttitle)
-    writeByte(buf, 0x22)
-    writeString(buf, tagline)
-    writeByte(buf, 0x28)
-    writeInt(buf, int(year))
-    writeByte(buf, 0x32)
-    writeString(buf, date)
-    writeByte(buf, 0x38)
-    writeByte(buf, 0x01)
-    writeByte(buf, 0x42)
-    writeString(buf, plot)
-    writeByte(buf, 0x5A)
-    writeString(buf, level)
-    writeByte(buf, 0x60)
-    writeInt(buf, int(float(rate) * 10))
+def write_string(ba, string):
+    byte = string.encode('utf-8')
+    length = len(byte)
+    write_int(ba, length)
+    ba.extend(byte)
 
+def write_int(ba, length):
+    while length > 128:
+        write_byte(ba, length % 128 + 128)
+        length = length // 128
+    write_byte(ba, length)
 
-def append_group_data(group, data_list, tag):
-    """
-    添加组数据（如演员、导演、流派等）
-    """
-    for data in data_list:
-        writeByte(group, tag)
-        writeString(group, data)
+def get_node(doc, tag, default=''):
+    nd = doc.getElementsByTagName(tag)
+    if len(nd) < 1 or not nd[0].hasChildNodes():
+        return default
+    return nd[0].firstChild.nodeValue
 
+def get_node_list(doc, tag, child_tag='', default=[]):
+    nds = doc.getElementsByTagName(tag)
+    if len(nds) < 1 or not nds[0].hasChildNodes():
+        return default
+    if len(child_tag) == 0:
+        return [nd.firstChild.nodeValue for nd in nds]
+    else:
+        return [get_node(nd, child_tag, '') for nd in nds]
 
-def write_image_data(buf, image_path, tag, group=None):
-    """
-    写入图片数据
-    """
-    if os.path.exists(image_path):
-        writeByte(buf, tag)
-        writeByte(buf, 0x01)
-        image_base64 = toBase64(image_path)
-        image_md5 = toMd5(image_base64)
-        writeString(buf, image_base64)
-        writeByte(buf, tag + 0x08)
-        writeByte(buf, 0x01)
-        writeString(buf, image_md5)
+def to_base64(pic_path):
+    with open(pic_path, "rb") as p:
+        pic_bytes = p.read()
+    return base64.b64encode(pic_bytes).decode('utf-8')
 
-        # 如果传入 group，则追加额外数据
-        if group is not None:
-            writeByte(group, 0x0A)
-            writeString(group, image_base64)
-            writeByte(group, 0x12)
-            writeString(group, image_md5)
-            writeByte(group, 0x18)
-            writeInt(group, int(time.time()))
-            writeInt(buf, len(group))
-            buf.extend(group)
-            group.clear()
+def to_md5(pic_final):
+    return hashlib.md5(pic_final.encode("utf-8")).hexdigest()
 
-
-# 其他辅助函数保持不变
-# ...
-
+def main():
+    try:
+        config = load_config()
+        logging.info("加载配置成功")
+        convert_list = []
+        check_all_files(config, convert_list)
+        logging.info(f"处理完成，共处理 {len(convert_list)} 个文件")
+        print(f"处理完成，共处理 {len(convert_list)} 个文件")
+    except Exception as e:
+        logging.error(f"程序运行出错: {e}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert nfo metadata to vsmeta.')
-    parser.add_argument('--directory', required=True, help='Directory to scan for files')
-    parser.add_argument('--poster', default='-poster.jpg', help='Poster file suffix')
-    parser.add_argument('--fanart', default='-fanart.jpg', help='Fanart file suffix')
-    args = parser.parse_args()
-
-    convert_list = []
-    scan_directory(args.directory, convert_list, args.poster, args.fanart)
-
-    logging.info(f'Successfully processed {len(convert_list)} files.')
+    main()
