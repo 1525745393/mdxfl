@@ -11,11 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 import argparse
 
 # 日志配置
+LOG_FILE = f"process-{time.strftime('%Y%m%d%H%M%S')}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("process.log")，
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
@@ -26,7 +27,8 @@ DEFAULT_CONFIG = {
     "poster_suffix": "-poster.jpg",        # 海报文件的后缀
     "fanart_suffix": "-fanart.jpg",        # 背景文件的后缀
     "video_extensions": [".mp4", ".mkv"], # 支持的视频文件扩展名
-    "delete_vsmeta": False                 # 是否删除已有的 vsmeta 文件
+    "delete_vsmeta": False,                # 是否删除已有的 vsmeta 文件
+    "max_workers": 4                       # 最大线程数
 }
 
 def create_default_config(config_file: str):
@@ -38,13 +40,28 @@ def create_default_config(config_file: str):
     except IOError as e:
         logging.error(f"无法创建默认配置文件: {e}")
 
+def validate_config(config: dict) -> bool:
+    """验证配置文件内容"""
+    required_keys = ["directory", "poster_suffix", "fanart_suffix", "video_extensions", "delete_vsmeta"]
+    for key in required_keys:
+        if key not in config:
+            logging.error(f"配置文件缺少必要的字段: {key}")
+            return False
+    return True
+
 def load_config(config_file: str = "config.json") -> dict:
-    """从 config.json 文件加载配置"""
+    """从配置文件加载并验证配置"""
     if not os.path.exists(config_file):
         logging.warning(f"配置文件 {config_file} 不存在，创建默认配置文件...")
         create_default_config(config_file)
+
     with open(config_file, 'r', encoding='utf-8') as file:
-        return json.load(file)
+        config = json.load(file)
+    
+    if not validate_config(config):
+        raise ValueError("配置文件验证失败")
+    
+    return config
 
 def get_video_files(directory: str, video_extensions: list[str]) -> iter:
     """获取指定目录及其子目录中符合视频扩展名的文件"""
@@ -58,7 +75,8 @@ def get_video_files(directory: str, video_extensions: list[str]) -> iter:
 
 def process_files_multithreaded(config: dict) -> list[str]:
     """多线程处理文件"""
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    max_workers = config.get('max_workers', os.cpu_count())
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(process_single_file, root, filename, config)
             for root, filename in get_video_files(config['directory'], config['video_extensions'])
@@ -80,6 +98,8 @@ def process_single_file(root: str, filename: str, config: dict) -> str:
         try:
             logging.info(f"删除已有 vsmeta 文件: {vsmeta_path}")
             os.remove(vsmeta_path)
+        except PermissionError as e:
+            logging.error(f"权限错误，无法删除文件 {vsmeta_path}: {e}")
         except OSError as e:
             logging.error(f"无法删除 vsmeta 文件 {vsmeta_path}: {e}")
 
@@ -89,8 +109,12 @@ def process_single_file(root: str, filename: str, config: dict) -> str:
         try:
             create_vsmeta(nfo_path, vsmeta_path, poster_path, fanart_path)
             return nfo_path
+        except FileNotFoundError as e:
+            logging.error(f"文件未找到: {e}")
+        except PermissionError as e:
+            logging.error(f"权限错误: {e}")
         except Exception as e:
-            logging.error(f"处理文件 {nfo_path} 时出错: {e}")
+            logging.error(f"处理文件 {nfo_path} 时出现未知错误: {e}")
     return ""
 
 def create_vsmeta(nfo_path: str, target_path: str, poster_path: str, fanart_path: str):
@@ -153,35 +177,42 @@ def process_image(image_path: str, buf: bytearray, group: bytearray, byte_prefix
         logging.error(f"处理图片文件 {image_path} 时出错: {e}", exc_info=True)
 
 def write_byte(ba: bytearray, t: int):
+    """将一个字节写入字节数组"""
     ba.extend(bytes([int(str(t))]))
 
 def write_string(ba: bytearray, string: str):
+    """将字符串写入字节数组"""
     byte = string.encode('utf-8')
     length = len(byte)
     write_int(ba, length)
     ba.extend(byte)
 
 def write_int(ba: bytearray, length: int):
+    """以变长整数格式写入字节数组"""
     while length > 128:
         write_byte(ba, length % 128 + 128)
         length = length // 128
     write_byte(ba, length)
 
 def get_node(doc: xmldom.Document, tag: str, default: str = '') -> str:
+    """获取 XML 节点值"""
     nd = doc.getElementsByTagName(tag)
     return nd[0].firstChild.nodeValue if len(nd) > 0 and nd[0].hasChildNodes() else default
 
 def get_node_list(doc: xmldom.Document, tag: str, child_tag: str = '', default: list = []) -> list:
+    """获取 XML 节点列表"""
     nds = doc.getElementsByTagName(tag)
     if len(child_tag) == 0:
         return [nd.firstChild.nodeValue for nd in nds if nd.hasChildNodes()]
     return [get_node(nd, child_tag, '') for nd in nds]
 
 def to_base64(pic_path: str) -> str:
+    """将图片编码为 Base64"""
     with open(pic_path, "rb") as p:
         return base64.b64encode(p.read()).decode('utf-8')
 
 def to_md5(content: str) -> str:
+    """计算 MD5 哈希值"""
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 def main():
