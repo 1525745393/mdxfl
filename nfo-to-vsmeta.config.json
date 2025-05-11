@@ -1,0 +1,8 @@
+{
+    "directory": "/volume1/MDC1/AV待整理/JAV_output",
+    "poster_suffix": "-poster.jpg",
+    "fanart_suffix": "-fanart.jpg",
+    "video_extensions": [".mkv", ".mp4", ".rmvb", ".avi", ".wmv", ".ts"],
+    "delete_vsmeta": true,
+    "log_file": "conversion.log"
+}
