@@ -5,20 +5,21 @@ import json
 import logging
 import time
 import hashlib
-import xml.dom.minidom as xmldom
+import xml.etree.ElementTree as ET
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Pool
 import argparse
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from functools import lru_cache
 
 # 日志配置
 LOG_FILE = f"process-{time.strftime('%Y%m%d%H%M%S')}.log"
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [Thread-%(thread)d] - %(levelname)s - %(message)s',
+    format='%(asctime)s - [Process-%(process)d] - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5),  # 每5MB轮转，保留5个备份
         logging.StreamHandler()
     ]
 )
@@ -43,7 +44,13 @@ def create_default_config(config_file: str):
         logging.error(f"无法创建默认配置文件: {e}")
 
 def validate_config(config: dict) -> bool:
-    """验证配置文件内容"""
+    """
+    验证配置文件内容是否完整
+    Args:
+        config (dict): 配置字典
+    Returns:
+        bool: 验证是否成功
+    """
     required_keys = ["directory", "poster_suffix", "fanart_suffix", "video_extensions", "delete_vsmeta"]
     for key in required_keys:
         if key not in config:
@@ -75,39 +82,29 @@ def is_valid_video_file(ext: str, video_extensions: list[str]) -> bool:
     return ext.lower() in video_extensions
 
 def get_video_files(directory: str, video_extensions: list[str]) -> iter[tuple[str, str]]:
-    """获取指定目录及其子目录中符合视频扩展名的文件"""
-    for root, _, files in os.walk(directory, topdown=True):
-        if '@eaDir' in root:  # 忽略无用目录
-            continue
-        for filename in files:
-            _, ext = os.path.splitext(filename)
-            if is_valid_video_file(ext, video_extensions):
-                yield root, filename
+    """使用 pathlib 简化文件遍历"""
+    directory_path = Path(directory)
+    for file_path in directory_path.rglob('*'):
+        if file_path.suffix.lower() in video_extensions:
+            yield file_path.parent, file_path.name
 
-def process_files_multithreaded(config: dict) -> list[str]:
-    """多线程处理文件"""
-    max_workers = config.get('max_workers', os.cpu_count())
-    errors = []
-    results = []
+def delete_file(file_path: Path):
+    """删除文件并处理异常"""
+    try:
+        file_path.unlink()
+        logging.info(f"删除文件: {file_path}")
+    except PermissionError as e:
+        logging.error(f"权限错误，无法删除文件 {file_path}: {e}")
+    except OSError as e:
+        logging.error(f"无法删除文件 {file_path}: {e}")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_single_file, root, filename, config): (root, filename)
-            for root, filename in get_video_files(config['directory'], config['video_extensions'])
-        }
-
-        for future in futures:
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as e:
-                root, filename = futures[future]
-                errors.append((root, filename, str(e)))
-
-    if errors:
-        logging.error(f"以下文件处理失败: {errors}")
-    
+def process_files_multiprocessing(config: dict) -> list[str]:
+    """多进程处理文件"""
+    with Pool(processes=min(config.get('max_workers', os.cpu_count() + 4), 32)) as pool:
+        results = pool.starmap(
+            process_single_file,
+            [(root, filename, config) for root, filename in get_video_files(config['directory'], config['video_extensions'])]
+        )
     return results
 
 def process_single_file(root: str, filename: str, config: dict) -> str:
@@ -122,13 +119,7 @@ def process_single_file(root: str, filename: str, config: dict) -> str:
     fanart_path = root_path / f"{Path(filename).stem}{fanart_suffix}"
 
     if delete_vsmeta and vsmeta_path.exists():
-        try:
-            logging.info(f"删除已有 vsmeta 文件: {vsmeta_path}")
-            vsmeta_path.unlink()
-        except PermissionError as e:
-            logging.error(f"权限错误，无法删除文件 {vsmeta_path}: {e}")
-        except OSError as e:
-            logging.error(f"无法删除 vsmeta 文件 {vsmeta_path}: {e}")
+        delete_file(vsmeta_path)
 
     nfo_path = root_path / f"{Path(filename).stem}.nfo"
     if nfo_path.exists() and not vsmeta_path.exists():
@@ -143,8 +134,7 @@ def process_single_file(root: str, filename: str, config: dict) -> str:
 def create_vsmeta(nfo_path: Path, target_path: Path, poster_path: Path, fanart_path: Path):
     """根据 nfo 文件创建 vsmeta 文件"""
     try:
-        doc = xmldom.parse(str(nfo_path))
-        metadata = extract_metadata(doc)
+        metadata = extract_metadata(nfo_path)
         buf = build_vsmeta_content(metadata, poster_path, fanart_path)
 
         with open(target_path, 'wb') as op:
@@ -153,24 +143,22 @@ def create_vsmeta(nfo_path: Path, target_path: Path, poster_path: Path, fanart_p
     except Exception as e:
         logging.error(f"写入 vsmeta 文件 {target_path} 时出错: {e}")
 
-def extract_metadata(doc: xmldom.Document) -> dict:
-    """从 nfo 文件中提取元数据"""
+def extract_metadata(nfo_path: Path) -> dict:
+    """
+    使用 ElementTree 提取元数据
+    Args:
+        nfo_path (Path): NFO 文件路径
+    Returns:
+        dict: 提取的元数据
+    """
+    tree = ET.parse(nfo_path)
+    root = tree.getroot()
     return {
-        'title': get_node(doc, 'title', '无标题'),
-        'sorttitle': get_node(doc, 'sorttitle', '无标题'),
-        'tagline': get_node(doc, 'tagline', '无标题'),
-        'plot': get_node(doc, 'plot'),
-        'year': get_node(doc, 'year', '1900'),
-        'level': get_node(doc, 'mpaa', 'G'),
-        'date': get_node(doc, 'premiered', '1900-01-01'),
-        'rate': get_node(doc, 'rating', '0'),
-        'genre': get_node_list(doc, 'genre'),
-        'actors': get_node_list(doc, 'actor', 'name'),
-        'directors': get_node_list(doc, 'director'),
-        'writers': get_node_list(doc, 'writer'),
+        'title': root.findtext('title', '无标题'),
+        'sorttitle': root.findtext('sorttitle', '无标题'),
+        'plot': root.findtext('plot'),
+        'year': root.findtext('year', '1900'),
     }
-
-# 省略中间重复函数...
 
 def main():
     parser = argparse.ArgumentParser(description="处理 nfo 文件生成 vsmeta 文件")
@@ -180,7 +168,7 @@ def main():
     try:
         config = load_config(args.config)
         logging.info("加载配置成功")
-        process_files_multithreaded(config)
+        process_files_multiprocessing(config)
     except Exception as e:
         logging.error(f"程序运行出错: {e}")
 
